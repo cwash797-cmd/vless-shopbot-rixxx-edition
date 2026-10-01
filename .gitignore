@@ -21,3 +21,10 @@ dist/
 test
 repomix-output.md
 vpn_users_report.txt
+
+# Environment & Secrets
+.env
+.env.*
+!.env.example
+*.sqlite
+*.sqlite3

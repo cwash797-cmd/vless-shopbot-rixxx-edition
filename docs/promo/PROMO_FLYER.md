@@ -1,5 +1,3 @@
-# Файл: /home/detker/Документы/repository/VPN/Panel-Naive-Mieru-by-RIXXX/PROMO_FLYER.md
-
 # 📄 Памятка пользователя: Двухзвенный каскадный VPN
 
 > Надежный персональный VPN на базе каскадной архитектуры (Москва → Финляндия) и протоколов нового поколения: NaiveProxy, Mieru и Hysteria 2.
