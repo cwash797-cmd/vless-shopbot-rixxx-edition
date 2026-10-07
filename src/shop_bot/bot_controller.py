@@ -54,6 +54,8 @@ class BotController:
                         await bot.set_my_commands(
                             [
                                 BotCommand(command="start", description="Главное меню"),
+                                BotCommand(command="keys", description="ID ключей пользователя"),
+                                BotCommand(command="bonus", description="Бонусные URI в подписке"),
                                 BotCommand(command="give", description="Выдать ключ"),
                                 BotCommand(command="grant", description="Дать права на выдачу"),
                                 BotCommand(command="revoke", description="Забрать права"),
@@ -77,7 +79,7 @@ class BotController:
         finally:
             logger.info(f"BotController: Polling for '{name}' has gracefully stopped.")
             if bot:
-                await bot.close()
+                await bot.session.close()
             if name == "ShopBot":
                 self.shop_is_running = False
                 self.shop_task = None
@@ -107,9 +109,13 @@ class BotController:
             }
 
         try:
+            if not admin_id.isdigit() or int(admin_id) <= 0:
+                return {'status': 'error', 'message': 'ID администратора должен быть положительным числом.'}
             self.shop_bot = Bot(token=token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
             self.shop_dp = Dispatcher()
-            self.shop_dp.update.middleware(BanMiddleware())
+            middleware = BanMiddleware()
+            self.shop_dp.message.outer_middleware(middleware)
+            self.shop_dp.callback_query.outer_middleware(middleware)
             self.shop_dp.include_router(get_user_router())
 
             self.shop_is_running = True
@@ -127,11 +133,11 @@ class BotController:
             
             ton_wallet_address = database.get_setting("ton_wallet_address")
             tonapi_key = database.get_setting("tonapi_key")
-            tonconnect_enabled = bool(ton_wallet_address and tonapi_key)
+            tonconnect_enabled = False  # No verified blockchain settlement implementation
 
             lava_api_key = database.get_setting("lava_api_key")
             lava_offer_id = database.get_setting("lava_offer_id")
-            lava_enabled = bool(lava_api_key and lava_offer_id)
+            lava_enabled = bool(lava_api_key and lava_offer_id and database.get_setting('lava_webhook_key'))
 
             if yookassa_enabled:
                 Configuration.account_id = yookassa_shop_id

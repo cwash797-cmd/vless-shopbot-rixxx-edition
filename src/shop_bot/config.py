@@ -1,3 +1,5 @@
+from html import escape
+
 CHOOSE_PLAN_MESSAGE = "Выберите подходящий тариф:"
 CHOOSE_PAYMENT_METHOD_MESSAGE = "Выберите удобный способ оплаты:"
 VPN_INACTIVE_TEXT = "❌ <b>Статус подписки:</b> Неактивна (срок истек)"
@@ -26,7 +28,7 @@ def get_key_info_text(key_number, expiry_date, created_date, connection_string):
         f"<b>➕ Приобретена:</b> {created_formatted}\n"
         f"<b>⏳ Действительна до:</b> {expiry_formatted}\n\n"
         f"Скопируйте эту ссылку и вставьте в Karing или Shadowrocket:\n\n"
-        f"<code>{connection_string}</code>"
+        f"<code>{escape(connection_string)}</code>"
     )
 
 def get_purchase_success_text(action: str, key_number: int, expiry_date, connection_string: str):
@@ -37,5 +39,5 @@ def get_purchase_success_text(action: str, key_number: int, expiry_date, connect
         f"🎉 <b>Ваша подписка #{key_number} {action_text}!</b>\n\n"
         f"⏳ <b>Она будет действовать до:</b> {expiry_formatted}\n\n"
         f"Для подключения скопируйте эту ссылку:\n\n"
-        f"<code>{connection_string}</code>"
+        f"<code>{escape(connection_string)}</code>"
     )

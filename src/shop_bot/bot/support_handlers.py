@@ -1,7 +1,7 @@
 import logging
 import json
 
-from aiogram import Bot, Router, F, types
+from aiogram import Bot, Router, F, types, html
 from aiogram.filters import CommandStart
 from aiogram.enums import ParseMode
 
@@ -18,7 +18,7 @@ async def get_user_summary(user_id: int, username: str) -> str:
     latest_transaction = database.get_latest_transaction(user_id)
 
     summary_parts = [
-        f"<b>Новый тикет от пользователя:</b> @{username} (ID: <code>{user_id}</code>)\n"
+        f"<b>Новый тикет от пользователя:</b> @{html.quote(username)} (ID: <code>{user_id}</code>)\n"
     ]
 
     if keys:
@@ -43,7 +43,7 @@ async def get_user_summary(user_id: int, username: str) -> str:
 def get_support_router() -> Router:
     support_router = Router()
 
-    @support_router.message(CommandStart())
+    @support_router.message(CommandStart(), F.chat.type == "private")
     async def handle_start(message: types.Message, bot: Bot):
         user_id = message.from_user.id
         username = message.from_user.username or message.from_user.full_name
@@ -57,7 +57,7 @@ def get_support_router() -> Router:
                 return
 
             try:
-                thread_name = f"Тикет от @{username} ({user_id})"
+                thread_name = f"Тикет от @{html.quote(username)} ({user_id})"
                 new_thread = await bot.create_forum_topic(chat_id=SUPPORT_GROUP_ID, name=thread_name)
                 thread_id = new_thread.message_thread_id
                 
@@ -99,9 +99,12 @@ def get_support_router() -> Router:
         thread_id = message.message_thread_id
         user_id = database.get_user_id_by_thread(thread_id)
         
-        if message.from_user.id == bot.id:
+        if not message.from_user or message.from_user.is_bot:
             return
             
+        member = await bot.get_chat_member(SUPPORT_GROUP_ID, message.from_user.id)
+        if member.status not in ('administrator', 'creator'):
+            return
         if user_id:
             try:
                 await bot.copy_message(

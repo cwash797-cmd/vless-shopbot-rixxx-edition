@@ -49,6 +49,7 @@ block content %}
 				<table class="transactions-table">
 					<thead>
 						<tr>
+							<th>ID платежа / статус</th>
 							<th>Пользователь</th>
 							<th>Хост</th>
 							<th>План</th>
@@ -59,6 +60,8 @@ block content %}
 					<tbody>
 						{% for tx in transactions %}
 						<tr>
+                            <td><code>{{ tx.payment_id }}</code><br /><strong>{{ tx.status }}</strong>
+                            {% if tx.status in ['review', 'processing'] %}<br />Требуется проверка выдачи на сервере{% endif %}</td>
 							<td>
 								{{ tx.username or 'N/A' }}<br /><small>({{tx.user_id}})</small>
 							</td>

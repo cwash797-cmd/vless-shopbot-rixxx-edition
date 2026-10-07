@@ -19,6 +19,7 @@
 			{% endfor %} {% endif %} {% endwith %}
 
 			<form method="post">
+<input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
 				<div class="form-group">
 					<label for="username">Логин:</label>
 					<input type="text" id="username" name="username" required />
@@ -27,7 +28,9 @@
 					<label for="password">Пароль:</label>
 					<input type="password" id="password" name="password" required />
 				</div>
-				<button type="submit" class="button button-primary" style="width: 100%">
+				<label for="otp">Код 2FA (если включён):</label>
+<input id="otp" name="otp" inputmode="numeric" autocomplete="one-time-code" />
+<button type="submit" class="button button-primary" style="width: 100%">
 					Войти
 				</button>
 			</form>

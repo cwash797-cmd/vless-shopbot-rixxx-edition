@@ -5,7 +5,8 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram import Bot
 from shop_bot.bot_controller import BotController
 from shop_bot.data_manager import database
-from shop_bot.bot import keyboards
+from shop_bot.bot import keyboards, handlers
+import json
 
 CHECK_INTERVAL_SECONDS = 300
 NOTIFY_BEFORE_HOURS = {72, 48, 24, 1}
@@ -43,7 +44,7 @@ async def send_subscription_notification(bot: Bot, user_id: int, key_id: int, ti
 
 def _cleanup_notified_users(all_db_keys: list[dict]):
     if not notified_users: return
-    active_key_ids = {key['key_id'] for key in all_db_keys}
+    active_key_ids = {(key['key_id'], key['expiry_date']) for key in all_db_keys}
     users_to_check = list(notified_users.keys())
     for user_id in users_to_check:
         keys_to_check = list(notified_users[user_id].keys())
@@ -64,16 +65,16 @@ async def check_expiring_subscriptions(bot: Bot):
             if time_left.total_seconds() < 0: continue
             total_hours_left = int(time_left.total_seconds() / 3600)
             user_id = key['user_id']
-            key_id = key['key_id']
+            key_id = (key['key_id'], key['expiry_date'])
             for hours_mark in NOTIFY_BEFORE_HOURS:
                 if hours_mark - 1 < total_hours_left <= hours_mark:
                     notified_users.setdefault(user_id, {}).setdefault(key_id, set())
                     if hours_mark not in notified_users[user_id][key_id]:
-                        await send_subscription_notification(bot, user_id, key_id, hours_mark, expiry_date)
+                        await send_subscription_notification(bot, user_id, key['key_id'], hours_mark, expiry_date)
                         notified_users[user_id][key_id].add(hours_mark)
                     break 
-        except Exception as e:
-            pass
+        except Exception:
+            logger.exception('Subscription scheduler operation failed')
 
 async def sync_keys_with_panels():
     # Заглушка. Панель RIXXX сама удаляет просроченных юзеров через свой cron.
@@ -84,9 +85,15 @@ async def periodic_subscription_check(bot_controller: BotController):
     while True:
         try:
             await sync_keys_with_panels()
-            if bot_controller.get_status().get("is_running"):
+            if bot_controller.get_status().get("shop_bot_running"):
                 bot = bot_controller.get_bot_instance()
-                if bot: await check_expiring_subscriptions(bot)
-        except Exception as e:
-            pass
+                if bot:
+                    for payment in database.get_verified_payments():
+                        method = json.loads(payment['metadata']).get('payment_method')
+                        if method == 'Lava.top SBP':
+                            method = 'Lava.top'
+                        await handlers.deliver_payment(bot, payment['payment_id'], method)
+                    await check_expiring_subscriptions(bot)
+        except Exception:
+            logger.exception('Subscription scheduler operation failed')
         await asyncio.sleep(CHECK_INTERVAL_SECONDS)

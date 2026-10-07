@@ -1,9 +1,7 @@
 FROM python:3.11-slim
-WORKDIR /app
-ENV PYTHONUNBUFFERED=1
-RUN python3 -m venv .venv
-ENV PATH="/app/.venv/bin:$PATH"
-COPY . /app/project/
+ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
 WORKDIR /app/project
-RUN pip install --no-cache-dir -e .
+COPY pyproject.toml ./
+COPY src ./src
+RUN pip install --no-cache-dir .
 CMD ["python3", "-m", "shop_bot"]
