@@ -38,6 +38,7 @@
 							action="{{ url_for('unban_user_route', user_id=user.telegram_id) }}"
 							method="post"
 						>
+<input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
 							<button type="submit" class="button button-start button-small">
 								Разбанить
 							</button>
@@ -48,6 +49,7 @@
 							method="post"
 							data-confirm="Вы уверены, что хотите забанить этого пользователя? Он не сможет пользоваться ботом."
 						>
+<input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
 							<button type="submit" class="button button-warning button-small">
 								Бан
 							</button>
@@ -58,6 +60,7 @@
 							method="post"
 							data-confirm="ВНИМАНИЕ! Это действие удалит ВСЕ ключи пользователя с серверов. Вы уверены?"
 						>
+<input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
 							<button type="submit" class="button button-danger button-small">
 								Отозвать
 							</button>

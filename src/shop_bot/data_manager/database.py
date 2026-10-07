@@ -1,3 +1,6 @@
+import os
+from contextlib import contextmanager
+from werkzeug.security import generate_password_hash
 import sqlite3
 from datetime import datetime
 import logging
@@ -6,12 +9,24 @@ import json
 
 logger = logging.getLogger(__name__)
 
-PROJECT_ROOT = Path("/app/project")
-DB_FILE = PROJECT_ROOT / "users.db"
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
+DB_FILE = Path(os.environ.get("DATABASE_PATH", str(PROJECT_ROOT / "users.db")))
+
+@contextmanager
+def _connect(timeout=30):
+    conn = sqlite3.connect(DB_FILE, timeout=timeout)
+    try:
+        with conn:
+            yield conn
+    finally:
+        conn.close()
+
 
 def initialize_db():
+    DB_FILE.touch(mode=0o600, exist_ok=True)
+    DB_FILE.chmod(0o600)
     try:
-        with sqlite3.connect(DB_FILE) as conn:
+        with _connect() as conn:
             cursor = conn.cursor()
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS users (
@@ -83,9 +98,19 @@ def initialize_db():
                     FOREIGN KEY (host_name) REFERENCES xui_hosts (host_name)
                 )
             ''')            
+            row = cursor.execute("SELECT value FROM bot_settings WHERE key = 'panel_password'").fetchone()
+            password = row[0] if row else None
+            if not password or password == 'admin':
+                password = os.environ.get('ADMIN_PASSWORD', '')
+                if len(password) < 12:
+                    raise ValueError('Set ADMIN_PASSWORD (at least 12 characters) for initial setup or migration from admin/admin')
+            if not password.startswith(('scrypt:', 'pbkdf2:')):
+                password = generate_password_hash(password)
+            cursor.execute("INSERT OR REPLACE INTO bot_settings (key, value) VALUES ('panel_password', ?)", (password,))
+            conn.commit()
             default_settings = {
                 "panel_login": "admin",
-                "panel_password": "admin",
+                "panel_password": password,
                 "about_text": None,
                 "terms_url": None,
                 "privacy_url": None,
@@ -129,7 +154,8 @@ def initialize_db():
             conn.commit()
             logging.info("Database initialized successfully.")
     except sqlite3.Error as e:
-        logging.error(f"Database error on initialization: {e}")
+        logging.error('Database initialization failed')
+        raise
 
 def run_migration():
     if not DB_FILE.exists():
@@ -230,7 +256,7 @@ def create_new_transactions_table(cursor: sqlite3.Cursor):
 
 def create_host(name: str, url: str, user: str, passwd: str, inbound: int):
     try:
-        with sqlite3.connect(DB_FILE) as conn:
+        with _connect() as conn:
             cursor = conn.cursor()
             cursor.execute(
                 "INSERT INTO xui_hosts (host_name, host_url, host_username, host_pass, host_inbound_id) VALUES (?, ?, ?, ?, ?)",
@@ -243,7 +269,7 @@ def create_host(name: str, url: str, user: str, passwd: str, inbound: int):
 
 def delete_host(host_name: str):
     try:
-        with sqlite3.connect(DB_FILE) as conn:
+        with _connect() as conn:
             cursor = conn.cursor()
             cursor.execute("DELETE FROM plans WHERE host_name = ?", (host_name,))
             cursor.execute("DELETE FROM xui_hosts WHERE host_name = ?", (host_name,))
@@ -254,7 +280,7 @@ def delete_host(host_name: str):
 
 def get_host(host_name: str) -> dict | None:
     try:
-        with sqlite3.connect(DB_FILE) as conn:
+        with _connect() as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
             cursor.execute("SELECT * FROM xui_hosts WHERE host_name = ?", (host_name,))
@@ -266,7 +292,7 @@ def get_host(host_name: str) -> dict | None:
 
 def get_all_hosts() -> list[dict]:
     try:
-        with sqlite3.connect(DB_FILE) as conn:
+        with _connect() as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
             cursor.execute("SELECT * FROM xui_hosts")
@@ -278,7 +304,7 @@ def get_all_hosts() -> list[dict]:
 
 def get_all_keys() -> list[dict]:
     try:
-        with sqlite3.connect(DB_FILE) as conn:
+        with _connect() as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
             cursor.execute("SELECT * FROM vpn_keys")
@@ -289,7 +315,7 @@ def get_all_keys() -> list[dict]:
 
 def get_setting(key: str) -> str | None:
     try:
-        with sqlite3.connect(DB_FILE) as conn:
+        with _connect() as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT value FROM bot_settings WHERE key = ?", (key,))
             result = cursor.fetchone()
@@ -301,7 +327,7 @@ def get_setting(key: str) -> str | None:
 def get_all_settings() -> dict:
     settings = {}
     try:
-        with sqlite3.connect(DB_FILE) as conn:
+        with _connect() as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
             cursor.execute("SELECT key, value FROM bot_settings")
@@ -314,7 +340,7 @@ def get_all_settings() -> dict:
 
 def update_setting(key: str, value: str):
     try:
-        with sqlite3.connect(DB_FILE) as conn:
+        with _connect() as conn:
             cursor = conn.cursor()
             cursor.execute("INSERT OR REPLACE INTO bot_settings (key, value) VALUES (?, ?)", (key, value))
             conn.commit()
@@ -324,7 +350,7 @@ def update_setting(key: str, value: str):
 
 def create_plan(host_name: str, plan_name: str, months: int, price: float):
     try:
-        with sqlite3.connect(DB_FILE) as conn:
+        with _connect() as conn:
             cursor = conn.cursor()
             cursor.execute(
                 "INSERT INTO plans (host_name, plan_name, months, price) VALUES (?, ?, ?, ?)",
@@ -337,7 +363,7 @@ def create_plan(host_name: str, plan_name: str, months: int, price: float):
 
 def get_plans_for_host(host_name: str) -> list[dict]:
     try:
-        with sqlite3.connect(DB_FILE) as conn:
+        with _connect() as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
             cursor.execute("SELECT * FROM plans WHERE host_name = ? ORDER BY months", (host_name,))
@@ -349,7 +375,7 @@ def get_plans_for_host(host_name: str) -> list[dict]:
 
 def get_plan_by_id(plan_id: int) -> dict | None:
     try:
-        with sqlite3.connect(DB_FILE) as conn:
+        with _connect() as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
             cursor.execute("SELECT * FROM plans WHERE plan_id = ?", (plan_id,))
@@ -361,7 +387,7 @@ def get_plan_by_id(plan_id: int) -> dict | None:
 
 def delete_plan(plan_id: int):
     try:
-        with sqlite3.connect(DB_FILE) as conn:
+        with _connect() as conn:
             cursor = conn.cursor()
             cursor.execute("DELETE FROM plans WHERE plan_id = ?", (plan_id,))
             conn.commit()
@@ -371,7 +397,7 @@ def delete_plan(plan_id: int):
 
 def register_user_if_not_exists(telegram_id: int, username: str, referrer_id):
     try:
-        with sqlite3.connect(DB_FILE) as conn:
+        with _connect() as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT telegram_id FROM users WHERE telegram_id = ?", (telegram_id,))
             if not cursor.fetchone():
@@ -387,7 +413,7 @@ def register_user_if_not_exists(telegram_id: int, username: str, referrer_id):
 
 def add_to_referral_balance(user_id: int, amount: float):
     try:
-        with sqlite3.connect(DB_FILE) as conn:
+        with _connect() as conn:
             cursor = conn.cursor()
             cursor.execute("UPDATE users SET referral_balance = referral_balance + ? WHERE telegram_id = ?", (amount, user_id))
             conn.commit()
@@ -396,7 +422,7 @@ def add_to_referral_balance(user_id: int, amount: float):
 
 def set_referral_balance(user_id: int, value: float):
     try:
-        with sqlite3.connect(DB_FILE) as conn:
+        with _connect() as conn:
             cursor = conn.cursor()
             cursor.execute("UPDATE users SET referral_balance = ? WHERE telegram_id = ?", (value, user_id))
             conn.commit()
@@ -405,7 +431,7 @@ def set_referral_balance(user_id: int, value: float):
 
 def set_referral_balance_all(user_id: int, value: float):
     try:
-        with sqlite3.connect(DB_FILE) as conn:
+        with _connect() as conn:
             cursor = conn.cursor()
             cursor.execute("UPDATE users SET referral_balance_all = ? WHERE telegram_id = ?", (value, user_id))
             conn.commit()
@@ -414,7 +440,7 @@ def set_referral_balance_all(user_id: int, value: float):
 
 def get_referral_balance(user_id: int) -> float:
     try:
-        with sqlite3.connect(DB_FILE) as conn:
+        with _connect() as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT referral_balance FROM users WHERE telegram_id = ?", (user_id,))
             result = cursor.fetchone()
@@ -425,7 +451,7 @@ def get_referral_balance(user_id: int) -> float:
 
 def get_referral_count(user_id: int) -> int:
     try:
-        with sqlite3.connect(DB_FILE) as conn:
+        with _connect() as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT COUNT(*) FROM users WHERE referred_by = ?", (user_id,))
             return cursor.fetchone()[0] or 0
@@ -435,7 +461,7 @@ def get_referral_count(user_id: int) -> int:
 
 def get_user(telegram_id: int):
     try:
-        with sqlite3.connect(DB_FILE) as conn:
+        with _connect() as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
             cursor.execute("SELECT * FROM users WHERE telegram_id = ?", (telegram_id,))
@@ -447,7 +473,7 @@ def get_user(telegram_id: int):
 
 def set_terms_agreed(telegram_id: int):
     try:
-        with sqlite3.connect(DB_FILE) as conn:
+        with _connect() as conn:
             cursor = conn.cursor()
             cursor.execute("UPDATE users SET agreed_to_terms = 1 WHERE telegram_id = ?", (telegram_id,))
             conn.commit()
@@ -457,7 +483,7 @@ def set_terms_agreed(telegram_id: int):
 
 def update_user_stats(telegram_id: int, amount_spent: float, months_purchased: int):
     try:
-        with sqlite3.connect(DB_FILE) as conn:
+        with _connect() as conn:
             cursor = conn.cursor()
             cursor.execute("UPDATE users SET total_spent = total_spent + ?, total_months = total_months + ? WHERE telegram_id = ?", (amount_spent, months_purchased, telegram_id))
             conn.commit()
@@ -466,7 +492,7 @@ def update_user_stats(telegram_id: int, amount_spent: float, months_purchased: i
 
 def get_user_count() -> int:
     try:
-        with sqlite3.connect(DB_FILE) as conn:
+        with _connect() as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT COUNT(*) FROM users")
             return cursor.fetchone()[0] or 0
@@ -476,7 +502,7 @@ def get_user_count() -> int:
 
 def get_total_keys_count() -> int:
     try:
-        with sqlite3.connect(DB_FILE) as conn:
+        with _connect() as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT COUNT(*) FROM vpn_keys")
             return cursor.fetchone()[0] or 0
@@ -486,7 +512,7 @@ def get_total_keys_count() -> int:
 
 def get_total_spent_sum() -> float:
     try:
-        with sqlite3.connect(DB_FILE) as conn:
+        with _connect() as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT SUM(total_spent) FROM users")
             return cursor.fetchone()[0] or 0.0
@@ -495,8 +521,12 @@ def get_total_spent_sum() -> float:
         return 0.0
 
 def create_pending_transaction(payment_id: str, user_id: int, amount_rub: float, metadata: dict) -> int:
+    metadata = dict(metadata)
+    plan = get_plan_by_id(metadata.get('plan_id'))
+    if plan:
+        metadata['plan_name'] = plan['plan_name']
     try:
-        with sqlite3.connect(DB_FILE) as conn:
+        with _connect() as conn:
             cursor = conn.cursor()
             cursor.execute(
                 "INSERT INTO transactions (payment_id, user_id, status, amount_rub, metadata) VALUES (?, ?, ?, ?, ?)",
@@ -508,52 +538,79 @@ def create_pending_transaction(payment_id: str, user_id: int, amount_rub: float,
         logging.error(f"Failed to create pending transaction: {e}")
         return 0
 
+def get_payment(payment_id: str) -> dict | None:
+    with _connect() as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT * FROM transactions WHERE payment_id = ?", (str(payment_id),)).fetchone()
+        return dict(row) if row else None
+
+
 def find_and_complete_ton_transaction(payment_id: str, amount_ton: float) -> dict | None:
-    try:
-        with sqlite3.connect(DB_FILE) as conn:
-            conn.row_factory = sqlite3.Row
-            cursor = conn.cursor()
-            
-            cursor.execute("SELECT * FROM transactions WHERE payment_id = ? AND status = 'pending'", (payment_id,))
-            transaction = cursor.fetchone()
-            if not transaction:
-                logger.warning(f"TON Webhook: Received payment for unknown or completed payment_id: {payment_id}")
-                return None
-            
-            
-            cursor.execute(
-                "UPDATE transactions SET status = 'paid', amount_currency = ?, currency_name = 'TON', payment_method = 'TON' WHERE payment_id = ?",
-                (amount_ton, payment_id)
-            )
-            conn.commit()
-            
-            return json.loads(transaction['metadata'])
-    except sqlite3.Error as e:
-        logging.error(f"Failed to complete TON transaction {payment_id}: {e}")
-        return None
-def find_and_complete_pending_transaction(payment_id: str, payment_method: str = "Lava.top") -> dict | None:
-    try:
-        with sqlite3.connect(DB_FILE) as conn:
-            conn.row_factory = sqlite3.Row
-            cursor = conn.cursor()
-            cursor.execute("SELECT * FROM transactions WHERE payment_id = ? AND status = 'pending'", (payment_id,))
-            transaction = cursor.fetchone()
-            if not transaction:
-                return None
-            cursor.execute(
-                "UPDATE transactions SET status = 'paid', payment_method = ? WHERE payment_id = ?",
-                (payment_method, payment_id)
-            )
-            conn.commit()
-            return json.loads(transaction['metadata'])
-    except sqlite3.Error as e:
-        logging.error(f"Failed to complete pending transaction {payment_id}: {e}")
-        return None
+    # No trusted blockchain verification exists in this version. Never accept JSON as proof.
+    return None
+
+
+def find_and_complete_pending_transaction(payment_id: str, payment_method: str = "Lava.top", user_id=None) -> dict | None:
+    """Claim once across webhook threads and polling. Issuance is a separate phase.
+
+    A crash leaves 'processing' visible for manual reconciliation, never an automatic
+    retry of an ambiguous remote renewal (which could extend the key twice).
+    """
+    with _connect(timeout=30) as conn:
+        conn.row_factory = sqlite3.Row
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute("SELECT * FROM transactions WHERE payment_id = ? AND status IN ('pending', 'verified')", (str(payment_id),)).fetchone()
+        if not row:
+            return None
+        metadata = json.loads(row['metadata'])
+        method = metadata.get('payment_method', '')
+        if method == 'Lava.top SBP':
+            method = 'Lava.top'
+        if method != payment_method or (user_id is not None and row['user_id'] != user_id):
+            return None
+        cursor = conn.execute(
+            "UPDATE transactions SET status = 'processing', payment_method = ? WHERE payment_id = ? AND status IN ('pending', 'verified')",
+            (payment_method, str(payment_id)))
+        if cursor.rowcount != 1:
+            return None
+        metadata['payment_id'] = str(payment_id)
+        return metadata
+
+
+def mark_payment_verified(payment_id: str):
+    """Durable inbox: survive a process exit between accepting and executing a webhook."""
+    with _connect() as conn:
+        conn.execute("UPDATE transactions SET status = 'verified' WHERE payment_id = ? AND status = 'pending'", (str(payment_id),))
+
+
+def get_verified_payments():
+    with _connect() as conn:
+        conn.row_factory = sqlite3.Row
+        return [dict(r) for r in conn.execute("SELECT * FROM transactions WHERE status = 'verified' ORDER BY created_date LIMIT 50")]
+
+
+def claim_trial(user_id: int) -> bool:
+    with _connect() as conn:
+        result = conn.execute("UPDATE users SET trial_used = 1 WHERE telegram_id = ? AND trial_used = 0 AND is_banned = 0", (user_id,))
+        return result.rowcount == 1
+
+
+def record_payment_target(payment_id: str, metadata: dict):
+    """Keep the intended remote identity for reconciliation after an ambiguous failure."""
+    with _connect() as conn:
+        conn.execute("UPDATE transactions SET metadata = ? WHERE payment_id = ? AND status = 'processing'",
+                     (json.dumps(metadata), str(payment_id)))
+
+
+def finish_payment(payment_id: str, successful: bool):
+    with _connect() as conn:
+        conn.execute("UPDATE transactions SET status = ? WHERE payment_id = ? AND status = 'processing'",
+                     ('paid' if successful else 'review', str(payment_id)))
 
 
 def log_transaction(username: str, transaction_id: str | None, payment_id: str | None, user_id: int, status: str, amount_rub: float, amount_currency: float | None, currency_name: str | None, payment_method: str, metadata: str):
     try:
-        with sqlite3.connect(DB_FILE) as conn:
+        with _connect() as conn:
             cursor = conn.cursor()
             cursor.execute(
                 """INSERT INTO transactions
@@ -570,7 +627,7 @@ def get_paginated_transactions(page: int = 1, per_page: int = 15) -> tuple[list[
     transactions = []
     total = 0
     try:
-        with sqlite3.connect(DB_FILE) as conn:
+        with _connect() as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
             
@@ -605,7 +662,7 @@ def get_paginated_transactions(page: int = 1, per_page: int = 15) -> tuple[list[
 
 def set_trial_used(telegram_id: int):
     try:
-        with sqlite3.connect(DB_FILE) as conn:
+        with _connect() as conn:
             cursor = conn.cursor()
             cursor.execute("UPDATE users SET trial_used = 1 WHERE telegram_id = ?", (telegram_id,))
             conn.commit()
@@ -615,7 +672,7 @@ def set_trial_used(telegram_id: int):
 
 def add_new_key(user_id: int, host_name: str, xui_client_uuid: str, key_email: str, expiry_timestamp_ms: int):
     try:
-        with sqlite3.connect(DB_FILE) as conn:
+        with _connect() as conn:
             cursor = conn.cursor()
             expiry_date = datetime.fromtimestamp(expiry_timestamp_ms / 1000)
             cursor.execute(
@@ -631,7 +688,7 @@ def add_new_key(user_id: int, host_name: str, xui_client_uuid: str, key_email: s
 
 def delete_key_by_email(email: str):
     try:
-        with sqlite3.connect(DB_FILE) as conn:
+        with _connect() as conn:
             cursor = conn.cursor()
             cursor.execute("DELETE FROM vpn_keys WHERE key_email = ?", (email,))
             conn.commit()
@@ -640,7 +697,7 @@ def delete_key_by_email(email: str):
 
 def get_user_keys(user_id: int):
     try:
-        with sqlite3.connect(DB_FILE) as conn:
+        with _connect() as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
             cursor.execute("SELECT * FROM vpn_keys WHERE user_id = ? ORDER BY key_id", (user_id,))
@@ -652,7 +709,7 @@ def get_user_keys(user_id: int):
 
 def get_key_by_id(key_id: int):
     try:
-        with sqlite3.connect(DB_FILE) as conn:
+        with _connect() as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
             cursor.execute("SELECT * FROM vpn_keys WHERE key_id = ?", (key_id,))
@@ -664,7 +721,7 @@ def get_key_by_id(key_id: int):
 
 def get_key_by_email(key_email: str):
     try:
-        with sqlite3.connect(DB_FILE) as conn:
+        with _connect() as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
             cursor.execute("SELECT * FROM vpn_keys WHERE key_email = ?", (key_email,))
@@ -676,7 +733,7 @@ def get_key_by_email(key_email: str):
 
 def update_key_info(key_id: int, new_xui_uuid: str, new_expiry_ms: int):
     try:
-        with sqlite3.connect(DB_FILE) as conn:
+        with _connect() as conn:
             cursor = conn.cursor()
             expiry_date = datetime.fromtimestamp(new_expiry_ms / 1000)
             cursor.execute("UPDATE vpn_keys SET xui_client_uuid = ?, expiry_date = ? WHERE key_id = ?", (new_xui_uuid, expiry_date, key_id))
@@ -690,7 +747,7 @@ def get_next_key_number(user_id: int) -> int:
 
 def get_keys_for_host(host_name: str) -> list[dict]:
     try:
-        with sqlite3.connect(DB_FILE) as conn:
+        with _connect() as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
             cursor.execute("SELECT * FROM vpn_keys WHERE host_name = ?", (host_name,))
@@ -702,7 +759,7 @@ def get_keys_for_host(host_name: str) -> list[dict]:
 
 def get_all_vpn_users():
     try:
-        with sqlite3.connect(DB_FILE) as conn:
+        with _connect() as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
             cursor.execute("SELECT DISTINCT user_id FROM vpn_keys")
@@ -714,7 +771,7 @@ def get_all_vpn_users():
 
 def update_key_status_from_server(key_email: str, xui_client_data):
     try:
-        with sqlite3.connect(DB_FILE) as conn:
+        with _connect() as conn:
             cursor = conn.cursor()
             if xui_client_data:
                 expiry_date = datetime.fromtimestamp(xui_client_data.expiry_time / 1000)
@@ -728,7 +785,7 @@ def update_key_status_from_server(key_email: str, xui_client_data):
 def get_daily_stats_for_charts(days: int = 30) -> dict:
     stats = {'users': {}, 'keys': {}}
     try:
-        with sqlite3.connect(DB_FILE) as conn:
+        with _connect() as conn:
             cursor = conn.cursor()
             query_users = """
                 SELECT date(registration_date) as day, COUNT(*)
@@ -759,7 +816,7 @@ def get_daily_stats_for_charts(days: int = 30) -> dict:
 def get_recent_transactions(limit: int = 15) -> list[dict]:
     transactions = []
     try:
-        with sqlite3.connect(DB_FILE) as conn:
+        with _connect() as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
             query = """
@@ -782,7 +839,7 @@ def get_recent_transactions(limit: int = 15) -> list[dict]:
 
 def add_support_thread(user_id: int, thread_id: int):
     try:
-        with sqlite3.connect(DB_FILE) as conn:
+        with _connect() as conn:
             cursor = conn.cursor()
             cursor.execute("INSERT OR REPLACE INTO support_threads (user_id, thread_id) VALUES (?, ?)", (user_id, thread_id))
             conn.commit()
@@ -791,7 +848,7 @@ def add_support_thread(user_id: int, thread_id: int):
 
 def get_support_thread_id(user_id: int) -> int | None:
     try:
-        with sqlite3.connect(DB_FILE) as conn:
+        with _connect() as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT thread_id FROM support_threads WHERE user_id = ?", (user_id,))
             result = cursor.fetchone()
@@ -802,7 +859,7 @@ def get_support_thread_id(user_id: int) -> int | None:
 
 def get_user_id_by_thread(thread_id: int) -> int | None:
     try:
-        with sqlite3.connect(DB_FILE) as conn:
+        with _connect() as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT user_id FROM support_threads WHERE thread_id = ?", (thread_id,))
             result = cursor.fetchone()
@@ -813,7 +870,7 @@ def get_user_id_by_thread(thread_id: int) -> int | None:
 
 def get_latest_transaction(user_id: int) -> dict | None:
     try:
-        with sqlite3.connect(DB_FILE) as conn:
+        with _connect() as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
             cursor.execute("SELECT * FROM transactions WHERE user_id = ? ORDER BY created_date DESC LIMIT 1", (user_id,))
@@ -825,7 +882,7 @@ def get_latest_transaction(user_id: int) -> dict | None:
 
 def get_all_users() -> list[dict]:
     try:
-        with sqlite3.connect(DB_FILE) as conn:
+        with _connect() as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
             cursor.execute("SELECT * FROM users ORDER BY registration_date DESC")
@@ -836,7 +893,7 @@ def get_all_users() -> list[dict]:
 
 def ban_user(telegram_id: int):
     try:
-        with sqlite3.connect(DB_FILE) as conn:
+        with _connect() as conn:
             cursor = conn.cursor()
             cursor.execute("UPDATE users SET is_banned = 1 WHERE telegram_id = ?", (telegram_id,))
             conn.commit()
@@ -845,7 +902,7 @@ def ban_user(telegram_id: int):
 
 def unban_user(telegram_id: int):
     try:
-        with sqlite3.connect(DB_FILE) as conn:
+        with _connect() as conn:
             cursor = conn.cursor()
             cursor.execute("UPDATE users SET is_banned = 0 WHERE telegram_id = ?", (telegram_id,))
             conn.commit()
@@ -854,7 +911,7 @@ def unban_user(telegram_id: int):
 
 def delete_user_keys(user_id: int):
     try:
-        with sqlite3.connect(DB_FILE) as conn:
+        with _connect() as conn:
             cursor = conn.cursor()
             cursor.execute("DELETE FROM vpn_keys WHERE user_id = ?", (user_id,))
             conn.commit()
@@ -863,7 +920,7 @@ def delete_user_keys(user_id: int):
 
 def set_user_give_permission(user_id: int, can_give: bool):
     try:
-        with sqlite3.connect(DB_FILE) as conn:
+        with _connect() as conn:
             cursor = conn.cursor()
             cursor.execute("UPDATE users SET can_give = ? WHERE telegram_id = ?", (int(can_give), user_id))
             conn.commit()
@@ -872,7 +929,7 @@ def set_user_give_permission(user_id: int, can_give: bool):
 
 def hard_delete_user_db(user_id: int):
     try:
-        with sqlite3.connect(DB_FILE) as conn:
+        with _connect() as conn:
             cursor = conn.cursor()
             cursor.execute("DELETE FROM vpn_keys WHERE user_id = ?", (user_id,))
             cursor.execute("DELETE FROM users WHERE telegram_id = ?", (user_id,))
@@ -882,7 +939,7 @@ def hard_delete_user_db(user_id: int):
 
 def set_custom_referral_percentage(user_id: int, percentage: float):
     try:
-        with sqlite3.connect(DB_FILE) as conn:
+        with _connect() as conn:
             cursor = conn.cursor()
             cursor.execute("UPDATE users SET custom_referral_percentage = ? WHERE telegram_id = ?", (percentage, user_id))
             conn.commit()
@@ -891,7 +948,7 @@ def set_custom_referral_percentage(user_id: int, percentage: float):
 
 def remove_custom_referral_percentage(user_id: int):
     try:
-        with sqlite3.connect(DB_FILE) as conn:
+        with _connect() as conn:
             cursor = conn.cursor()
             cursor.execute("UPDATE users SET custom_referral_percentage = NULL WHERE telegram_id = ?", (user_id,))
             conn.commit()

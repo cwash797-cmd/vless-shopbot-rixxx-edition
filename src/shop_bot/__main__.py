@@ -1,69 +1,57 @@
-import logging
-import threading
 import asyncio
+import logging
+import os
 import signal
+import threading
+from pathlib import Path
+
+from dotenv import load_dotenv
+from waitress import create_server
+
+load_dotenv(Path(__file__).resolve().parents[2] / '.env')
 
 from shop_bot.webhook_server.app import create_webhook_app
 from shop_bot.data_manager.scheduler import periodic_subscription_check
 from shop_bot.data_manager import database
 from shop_bot.bot_controller import BotController
 
+
 def main():
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s - [%(levelname)s] - %(name)s - (%(filename)s).%(funcName)s(%(lineno)d) - %(message)s"
-    )
-    logger = logging.getLogger(__name__)
-
+    logging.basicConfig(level=os.environ.get('LOG_LEVEL', 'INFO'),
+                        format='%(asctime)s %(levelname)s %(name)s: %(message)s')
     database.initialize_db()
-    logger.info("Database initialization check complete.")
+    controller = BotController()
+    app = create_webhook_app(controller)
 
-    bot_controller = BotController()
-    flask_app = create_webhook_app(bot_controller)
-    
-    async def shutdown(sig: signal.Signals, loop: asyncio.AbstractEventLoop):
-        logger.info(f"Received signal: {sig.name}. Shutting down...")
-        if bot_controller.get_status()["is_running"]:
-            bot_controller.stop()
-            await asyncio.sleep(2)
-        tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
-        if tasks:
-            [task.cancel() for task in tasks]
-            await asyncio.gather(*tasks, return_exceptions=True)
-        loop.stop()
-
-    async def start_services():
+    async def run():
         loop = asyncio.get_running_loop()
-        bot_controller.set_loop(loop)
-        flask_app.config['EVENT_LOOP'] = loop
-        
+        stopped = asyncio.Event()
+        controller.set_loop(loop)
+        app.config['EVENT_LOOP'] = loop
         for sig in (signal.SIGINT, signal.SIGTERM):
-            loop.add_signal_handler(sig, lambda sig=sig: asyncio.create_task(shutdown(sig, loop)))
-        
-        flask_thread = threading.Thread(
-            target=lambda: flask_app.run(host='0.0.0.0', port=1488, use_reloader=False, debug=False),
-            daemon=True
-        )
-        flask_thread.start()
-        
-        logger.info("Flask server started in a background thread on http://0.0.0.0:1488")
-        logger.info("Application is running.")
+            loop.add_signal_handler(sig, stopped.set)
+        server = create_server(app, host=os.environ.get('WEBHOOK_HOST', '127.0.0.1'),
+                               port=int(os.environ.get('WEBHOOK_PORT', '1488')),
+                               threads=4, max_request_body_size=256 * 1024)
+        thread = threading.Thread(target=server.run, daemon=True)
+        thread.start()
+        logging.info('Web admin listening; configure HTTPS reverse proxy before accepting payments')
+        logging.info('Shop bot: %s', controller.start_shop_bot().get('message'))
+        if database.get_setting('support_bot_token') and database.get_setting('support_group_id'):
+            controller.start_support_bot()
+        scheduler = asyncio.create_task(periodic_subscription_check(controller))
+        try:
+            await stopped.wait()
+        finally:
+            controller.stop_shop_bot()
+            controller.stop_support_bot()
+            scheduler.cancel()
+            await asyncio.gather(scheduler, return_exceptions=True)
+            await asyncio.sleep(1)
+            server.close()
 
-        # Автоматический запуск ботов при наличии конфигурации
-        shop_res = bot_controller.start_shop_bot()
-        logger.info(f"Auto-start ShopBot: {shop_res.get('message')}")
+    asyncio.run(run())
 
-        if database.get_setting("support_bot_token") and database.get_setting("support_group_id"):
-            supp_res = bot_controller.start_support_bot()
-            logger.info(f"Auto-start SupportBot: {supp_res.get('message')}")
-        asyncio.create_task(periodic_subscription_check(bot_controller))
 
-        await asyncio.Future()
-
-    try:
-        asyncio.run(start_services())
-    finally:
-        logger.info("Application is shutting down.")
-
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()

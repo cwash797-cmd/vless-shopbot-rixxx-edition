@@ -1,176 +1,225 @@
-import uuid
-import logging
+"""RIXXX v1.11 panel adapter (not a 3x-ui adapter).
+
+The panel owns the subscription token and aggregates local, federation and bonus
+links. Never construct a subscription from an admin URL containing credentials.
+"""
 import asyncio
-from datetime import datetime, timedelta
+import hashlib
+import ipaddress
+import logging
+import re
+import secrets
+from datetime import datetime, timedelta, timezone
+from urllib.parse import urlsplit
+
 import aiohttp
-from typing import Dict
+from yarl import URL
 
 from shop_bot.data_manager.database import get_host
 
 logger = logging.getLogger(__name__)
+NO_FEDERATION = 'No enabled federation nodes are configured.'
+TIMEOUT = aiohttp.ClientTimeout(total=60, connect=10)
 
-async def _login_to_rixxx(session: aiohttp.ClientSession, host_url: str, username: str, password: str) -> bool:
+
+def _username(email):
+    legacy = email.replace('@', '_').replace('+', '_').replace('.', '_')
+    if re.fullmatch(r'[a-zA-Z0-9_-]{1,64}', legacy):
+        return legacy
+    return 'tg_' + hashlib.sha256(email.encode()).hexdigest()[:40]
+
+
+def _session(host):
+    url = URL(host['host_url'].rstrip('/'))
+    if url.scheme not in ('http', 'https') or not url.host or url.query_string or url.fragment:
+        raise ValueError('Invalid panel URL')
+    auth = aiohttp.BasicAuth(url.user, url.password or '') if url.user else None
+    base = str(url.with_user(None)).rstrip('/')
     try:
-        base_url = host_url.rstrip('/')
-        login_url = f"{base_url}/api/login"
-        async with session.post(login_url, json={"username": username, "password": password}) as resp:
-            if resp.status == 200:
-                data = await resp.json()
-                if data.get("ok"):
-                    return True
-            logger.error(f"Login failed to {host_url}: HTTP {resp.status} - {await resp.text()}")
+        ipaddress.ip_address(url.host)
+        ip_host = True
+    except ValueError:
+        ip_host = False
+    # aiohttp rejects IP-host cookies by default, including 127.0.0.1.
+    jar = aiohttp.CookieJar(unsafe=ip_host)
+    return base, aiohttp.ClientSession(timeout=TIMEOUT, cookie_jar=jar, auth=auth)
+
+
+async def _login_to_rixxx(session, host_url, username, password):
+    async with session.post(f'{host_url}/api/login', json={'username': username, 'password': password}, allow_redirects=False) as response:
+        if response.status != 200:
+            logger.error('RIXXX login rejected: HTTP %s', response.status)
             return False
-    except Exception as e:
-        logger.error(f"Error logging in to {host_url}: {e}", exc_info=True)
-        return False
+        data = await response.json()
+        return isinstance(data, dict) and data.get('ok') is True
 
-async def create_or_update_key_on_host(host_name: str, email: str, days_to_add: int) -> Dict | None:
-    host_data = get_host(host_name)
-    if not host_data: return None
-    base_url = host_data['host_url'].rstrip('/')
-    
-    # Меняем @, + и ТОЧКУ на подчеркивание!
-    safe_username = email.replace('@', '_').replace('+', '_').replace('.', '_')
-    
-    timeout = aiohttp.ClientTimeout(total=15)
-    async with aiohttp.ClientSession(timeout=timeout) as session:
-        if not await _login_to_rixxx(session, base_url, host_data['host_username'], host_data['host_pass']):
+
+async def _users(session, base):
+    async with session.get(f'{base}/api/users', allow_redirects=False) as response:
+        if response.status != 200:
+            raise RuntimeError('Could not list RIXXX users')
+        data = await response.json()
+        if not isinstance(data, list):
+            raise ValueError('Unexpected RIXXX user list')
+        return data
+
+
+def _find(users, email):
+    return next((u for u in users if u.get('email') == email or u.get('username') == _username(email)), None)
+
+
+async def _federate(session, base, user_id, action, email):
+    async with session.post(f'{base}/api/users/{user_id}/federation/{action}',
+                            json={'email': email}, allow_redirects=False) as response:
+        data = await response.json()
+        if response.status == 400 and data.get('error') == NO_FEDERATION:
+            return True
+        results = data.get('results')
+        success = (response.status == 200 and data.get('ok') is True
+                   and isinstance(results, list)
+                   and all(isinstance(r, dict) and r.get('ok') is True for r in results))
+        if not success:
+            logger.error('RIXXX federation %s incomplete for user ID %s (HTTP %s)', action, user_id, response.status)
+        return success
+
+
+async def _sub_link(session, base, user_id):
+    async with session.get(f'{base}/api/users/{user_id}/sub-link', allow_redirects=False) as response:
+        if response.status != 200:
             return None
+        link = (await response.json()).get('link')
+        if not isinstance(link, str):
+            return None
+        parsed = urlsplit(link)
+        if parsed.scheme not in ('https', 'http') or not parsed.hostname or parsed.username or parsed.password:
+            raise ValueError('Unsafe subscription URL returned by panel')
+        return link
 
-        expiry_dt = datetime.utcnow() + timedelta(days=days_to_add)
-        expiry_iso = expiry_dt.isoformat() + "Z"
-        expiry_ms = int(expiry_dt.timestamp() * 1000)
-        user_id = None
-        
-        async with session.get(f"{base_url}/api/users") as resp:
-            if resp.status == 200:
-                users = await resp.json()
-                existing_user = next((u for u in users if u.get('username') == safe_username), None)
-                if existing_user:
-                    user_id = existing_user['id']
-                    if existing_user.get('expiry'):
-                        current_expiry = datetime.fromisoformat(existing_user['expiry'].replace('Z', '+00:00')).replace(tzinfo=None)
-                        if current_expiry > datetime.utcnow():
-                            expiry_dt = current_expiry + timedelta(days=days_to_add)
-                            expiry_iso = expiry_dt.isoformat() + "Z"
-                            expiry_ms = int(expiry_dt.timestamp() * 1000)
-                    update_payload = {"expiry": expiry_iso}
-                    try:
-                        async with session.put(f"{base_url}/api/users/{user_id}", json=update_payload) as up_resp:
-                            if up_resp.status != 200: return None
-                    except (aiohttp.client_exceptions.ServerDisconnectedError, aiohttp.client_exceptions.ClientOSError):
-                        logger.warning("Caddy restarted during user update. Proceeding...")
-        
-        if not user_id:
-            user_password = str(uuid.uuid4())[:16]
-            create_payload = {
-                "username": safe_username, 
-                "email": email, 
-                "password": user_password,
-                "expiry": expiry_iso, 
-                "protocols": ["naive", "mieru", "hy2"], 
-                "quotaMB": 0
-            }
+
+async def create_or_update_key_on_host(host_name: str, email: str, days_to_add: int) -> dict | None:
+    host = get_host(host_name)
+    if not host or not email or not isinstance(days_to_add, int) or not 1 <= days_to_add <= 36500:
+        return None
+    try:
+        base, context = _session(host)
+        async with context as session:
+            if not await _login_to_rixxx(session, base, host['host_username'], host['host_pass']):
+                return None
+            user = _find(await _users(session, base), email)
+            now = datetime.now(timezone.utc)
+            current = now
+            if user and user.get('expiry'):
+                current = datetime.fromisoformat(user['expiry'].replace('Z', '+00:00'))
+                if current.tzinfo is None:
+                    current = current.replace(tzinfo=timezone.utc)
+            expiry = max(now, current) + timedelta(days=days_to_add)
+            payload = {'expiry': expiry.isoformat()}
             try:
-                async with session.post(f"{base_url}/api/users", json=create_payload) as resp:
-                    if resp.status in (200, 201):
-                        data = await resp.json()
-                        user_id = data.get('id')
-                    else: 
-                        logger.error(f"Failed to create user {safe_username}: {await resp.text()}")
-                        return None
-            except (aiohttp.client_exceptions.ServerDisconnectedError, aiohttp.client_exceptions.ClientOSError):
-                logger.warning("Server disconnected during user creation (Caddy restart). Verifying...")
-                await asyncio.sleep(3)
-                if not await _login_to_rixxx(session, base_url, host_data['host_username'], host_data['host_pass']):
-                    return None
-                async with session.get(f"{base_url}/api/users") as resp:
-                    if resp.status == 200:
-                        users = await resp.json()
-                        new_user = next((u for u in users if u.get('username') == safe_username), None)
-                        if new_user:
-                            user_id = new_user['id']
-                        else:
-                            logger.error("User was not found after disconnect.")
+                if user:
+                    async with session.put(f"{base}/api/users/{user['id']}", json=payload, allow_redirects=False) as response:
+                        if response.status != 200:
                             return None
-
-        # Автоматический довыпуск в Федерацию RIXXX (v1.10+ / v1.11+), если настроены связанные ноды
-        if user_id:
+                else:
+                    payload.update(username=_username(email), email=email, password=secrets.token_urlsafe(24),
+                                   protocols=['naive', 'mieru', 'hy2'], quotaMB=0)
+                    async with session.post(f'{base}/api/users', json=payload, allow_redirects=False) as response:
+                        if response.status not in (200, 201):
+                            return None
+                        user = await response.json()
+            except (aiohttp.ClientConnectionError, asyncio.TimeoutError):
+                # A disconnected PUT/POST may already be committed. Read it back;
+                # do not blindly add the purchased period again.
+                await asyncio.sleep(1)
+                if not await _login_to_rixxx(session, base, host['host_username'], host['host_pass']):
+                    return None
+                user = _find(await _users(session, base), email)
+                if not user or not user.get('expiry'):
+                    return None
+                actual = datetime.fromisoformat(user['expiry'].replace('Z', '+00:00'))
+                if actual.tzinfo is None:
+                    actual = actual.replace(tzinfo=timezone.utc)
+                if abs((actual - expiry).total_seconds()) > 1:
+                    return None
+            if not user or not user.get('id'):
+                return None
+            federation_ok = False
             try:
-                async with session.post(f"{base_url}/api/users/{user_id}/federation/deploy") as fed_resp:
-                    if fed_resp.status == 200:
-                        fed_data = await fed_resp.json()
-                        logger.info(f"RIXXX Federation deploy succeeded for user {user_id}: {fed_data.get('results')}")
-                    elif fed_resp.status == 400:
-                        # Одиночный сервер без федерации — штатное поведение
-                        pass
-                    else:
-                        logger.warning(f"RIXXX Federation deploy returned status {fed_resp.status}")
-            except Exception as e:
-                logger.warning(f"RIXXX Federation deploy skipped: {e}")
+                federation_ok = await _federate(session, base, user['id'], 'deploy', email)
+            except (aiohttp.ClientError, asyncio.TimeoutError, ValueError):
+                logger.error('Federation deploy could not be confirmed')
+            link = await _sub_link(session, base, user['id'])
+            if not link:
+                return None
+            return {'client_uuid': user['id'], 'email': email, 'expiry_timestamp_ms': int(expiry.timestamp() * 1000),
+                    'connection_string': link, 'host_name': host_name, 'federation_ok': federation_ok}
+    except (aiohttp.ClientError, asyncio.TimeoutError, ValueError, RuntimeError, KeyError):
+        # Do not log exception URLs: legacy configurations embed Basic Auth secrets.
+        logger.error('RIXXX provisioning failed; check connectivity and panel configuration')
+        return None
 
-        connection_string = None
-        if user_id:
-            for _ in range(3):
-                try:
-                    async with session.get(f"{base_url}/api/users/{user_id}/sub-link") as resp:
-                        if resp.status == 200:
-                            data = await resp.json()
-                            connection_string = data.get('link')
-                            break
-                except Exception:
-                    await asyncio.sleep(2)
-                    await _login_to_rixxx(session, base_url, host_data['host_username'], host_data['host_pass'])
-                
-        if not connection_string:
-            return None
-                
-        return {
-            "client_uuid": user_id, "email": email, "expiry_timestamp_ms": expiry_ms,
-            "connection_string": connection_string, "host_name": host_name
-        }
 
 async def get_key_details_from_host(key_data: dict) -> dict | None:
-    host_name = key_data.get('host_name')
-    if not host_name: return None
-    host_db_data = get_host(host_name)
-    if not host_db_data: return None
-    base_url = host_db_data['host_url'].rstrip('/')
-    async with aiohttp.ClientSession() as session:
-        if not await _login_to_rixxx(session, base_url, host_db_data['host_username'], host_db_data['host_pass']): return None
-        user_id = key_data.get('xui_client_uuid')
-        async with session.get(f"{base_url}/api/users/{user_id}/sub-link") as resp:
-            if resp.status == 200:
-                data = await resp.json()
-                return {"connection_string": data.get('link')}
-    return None
+    host = get_host(key_data.get('host_name'))
+    if not host:
+        return None
+    try:
+        base, context = _session(host)
+        async with context as session:
+            if not await _login_to_rixxx(session, base, host['host_username'], host['host_pass']):
+                return None
+            link = await _sub_link(session, base, key_data['xui_client_uuid'])
+            return {'connection_string': link} if link else None
+    except (aiohttp.ClientError, asyncio.TimeoutError, ValueError, KeyError):
+        logger.error('Could not read RIXXX subscription')
+        return None
+
 
 async def delete_client_on_host(host_name: str, client_email: str) -> bool:
-    host_data = get_host(host_name)
-    if not host_data: return False
-    base_url = host_data['host_url'].rstrip('/')
-    safe_username = client_email.replace('@', '_').replace('+', '_').replace('.', '_')
-    async with aiohttp.ClientSession() as session:
-        if not await _login_to_rixxx(session, base_url, host_data['host_username'], host_data['host_pass']): return False
-        user_id = None
-        async with session.get(f"{base_url}/api/users") as resp:
-            if resp.status == 200:
-                users = await resp.json()
-                existing_user = next((u for u in users if u.get('username') == safe_username), None)
-                if existing_user: user_id = existing_user['id']
-        if user_id:
-            # Автоматический отзыв пользователя из Федерации RIXXX (v1.11+)
-            try:
-                async with session.post(f"{base_url}/api/users/{user_id}/federation/undeploy", json={"email": client_email}) as fed_resp:
-                    if fed_resp.status == 200:
-                        logger.info(f"RIXXX Federation undeploy for email {client_email} succeeded.")
-            except Exception as e:
-                logger.warning(f"RIXXX Federation undeploy skipped: {e}")
-
-            try:
-                async with session.delete(f"{base_url}/api/users/{user_id}") as resp:
-                    if resp.status == 200: return True
-            except (aiohttp.client_exceptions.ServerDisconnectedError, aiohttp.client_exceptions.ClientOSError):
+    host = get_host(host_name)
+    if not host:
+        return False
+    try:
+        base, context = _session(host)
+        async with context as session:
+            if not await _login_to_rixxx(session, base, host['host_username'], host['host_pass']):
+                return False
+            user = _find(await _users(session, base), client_email)
+            # Panel supports email fallback if the hub user has already expired.
+            user_id = user['id'] if user else 'deleted'
+            if not await _federate(session, base, user_id, 'undeploy', client_email):
+                return False
+            if not user:
                 return True
-        else: return True
-    return False
+            try:
+                async with session.delete(f'{base}/api/users/{user_id}', allow_redirects=False) as response:
+                    if response.status not in (200, 404):
+                        return False
+            except (aiohttp.ClientConnectionError, asyncio.TimeoutError):
+                await asyncio.sleep(1)
+                if not await _login_to_rixxx(session, base, host['host_username'], host['host_pass']):
+                    return False
+            return _find(await _users(session, base), client_email) is None
+    except (aiohttp.ClientError, asyncio.TimeoutError, ValueError, RuntimeError, KeyError):
+        logger.error('RIXXX revocation unconfirmed; retaining local key for retry')
+        return False
+
+
+async def set_bonus_links(key_data: dict, links: list[str]) -> bool:
+    """Replace personal bonus URIs; the same /sub/token serves the updated list."""
+    allowed = {'vless', 'vmess', 'trojan', 'ss', 'ssr', 'naive+https', 'https', 'mierus', 'mieru', 'hysteria2', 'hy2', 'tuic'}
+    if len(links) > 30 or any(len(link) > 4096 or urlsplit(link).scheme not in allowed for link in links):
+        return False
+    host = get_host(key_data.get('host_name'))
+    if not host:
+        return False
+    try:
+        base, context = _session(host)
+        async with context as session:
+            if not await _login_to_rixxx(session, base, host['host_username'], host['host_pass']):
+                return False
+            async with session.put(f"{base}/api/users/{key_data['xui_client_uuid']}/bonus-links",
+                                   json={'links': links}, allow_redirects=False) as response:
+                return response.status == 200
+    except (aiohttp.ClientError, asyncio.TimeoutError, ValueError, KeyError):
+        logger.error('Could not update RIXXX bonus links')
+        return False

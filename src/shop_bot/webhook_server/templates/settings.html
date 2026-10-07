@@ -11,6 +11,7 @@
 			<div class="host-card">
 				<h4>Добавить новый хост</h4>
 				<form action="{{ url_for('add_host_route') }}" method="post">
+<input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
 					<div class="form-group">
 						<label for="host_name">Название хоста:</label>
 						<input
@@ -22,7 +23,7 @@
 						/>
 					</div>
 					<div class="form-group">
-						<label for="host_url">URL панели (RIXXX или 3X-UI):</label>
+						<label for="host_url">URL панели RIXXX v1.11+:</label>
 						<input
 							type="url"
 							id="host_url"
@@ -31,11 +32,11 @@
 							required
 						/>
 						<small style="display:block;margin-top:4px;color:#888;font-size:0.85em;">
-							Для панели RIXXX обязательно укажите Basic Auth: <code>https://логин:пароль@домен/секретный-путь/</code>. Для 3X-UI: <code>http://ip:port</code>.
+							Для панели RIXXX обязательно укажите Basic Auth: <code>https://логин:пароль@домен/секретный-путь/</code>. Отдельный адаптер 3x-ui в этой версии отсутствует.
 						</small>
 					</div>
 					<div class="form-group">
-						<label for="host_username">Логин XUI:</label>
+						<label for="host_username">Логин панели RIXXX:</label>
 						<input
 							type="text"
 							id="host_username"
@@ -44,7 +45,7 @@
 						/>
 					</div>
 					<div class="form-group password-wrapper">
-						<label for="host_pass">Пароль XUI:</label>
+						<label for="host_pass">Пароль панели RIXXX:</label>
 						<input type="password" id="host_pass" name="host_pass" required />
 						<button type="button" class="toggle-password">👁️</button>
 					</div>
@@ -57,7 +58,7 @@
 							value="1"
 						/>
 						<small style="display:block;margin-top:4px;color:#888;font-size:0.85em;">
-							Для панели RIXXX оставьте <b>1</b> (не используется). Для 3X-UI укажите номер вашего инбаунда.
+							Для панели RIXXX оставьте <b>1</b> (не используется). Используется только API RIXXX.
 						</small>
 					</div>
 					<button type="submit" class="button button-primary">Добавить</button>
@@ -73,12 +74,13 @@
 						method="post"
 						data-confirm="Вы уверены, что хотите удалить этот хост и все его тарифы?"
 					>
+<input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
 						<button type="submit" class="button button-danger button-small">
 							Удалить
 						</button>
 					</form>
 				</div>
-				<p><strong>URL:</strong> {{ host.host_url }}</p>
+				<p><strong>URL:</strong> {{ host.display_url }}</p>
 				<div class="plans-section">
 					<h4>Тарифы:</h4>
 					{% if host.plans %}
@@ -92,6 +94,7 @@
 								action="{{ url_for('delete_plan_route', plan_id=plan.plan_id) }}"
 								method="post"
 							>
+<input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
 								<button type="submit" class="button button-danger button-tiny">
 									×
 								</button>
@@ -108,6 +111,7 @@
 						method="post"
 						class="form-inline"
 					>
+<input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
 						<input
 							type="hidden"
 							name="host_name"
@@ -141,6 +145,7 @@
 
 	<div class="settings-column-right">
 		<form action="{{ url_for('settings_page') }}" method="post">
+<input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
 			<section class="settings-section">
 				<h2>Настройки Панели</h2>
 				<div class="form-group">

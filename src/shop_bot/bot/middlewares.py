@@ -1,9 +1,14 @@
+import asyncio
+from weakref import WeakValueDictionary
 from typing import Callable, Dict, Any, Awaitable
 from aiogram import BaseMiddleware
 from aiogram.types import TelegramObject, Message, CallbackQuery, Chat
 from shop_bot.data_manager.database import get_user
 
 class BanMiddleware(BaseMiddleware):
+    def __init__(self):
+        self.locks = WeakValueDictionary()
+
     async def __call__(
         self,
         handler: Callable[[TelegramObject, Dict[str, Any]], Awaitable[Any]],
@@ -23,4 +28,6 @@ class BanMiddleware(BaseMiddleware):
                 await event.answer(ban_message_text)
             return
         
-        return await handler(event, data)
+        lock = self.locks.setdefault(user.id, asyncio.Lock())
+        async with lock:
+            return await handler(event, data)
